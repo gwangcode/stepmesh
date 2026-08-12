@@ -1,4 +1,6 @@
-# stepmesh
+# stepmesh 
+
+[![DOI](https://zenodo.org/badge/1332405493.svg)](https://doi.org/10.5281/zenodo.21909276)
 
 A Python package for processing 3D STEP/CAD files, performing multi-body boolean operations, and generating tetrahedral meshes (`.msh`), STL files (`.stl`), and UNV files (`.unv`) using **Gmsh** and **NumPy**.
 
