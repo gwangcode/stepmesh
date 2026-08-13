@@ -3,15 +3,71 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "stepmesh"  # 他人 pip install 成功后的包名
+name = "stepmesh"
 version = "0.1.0"
-description = "A CAD mesh processing package using Gmsh and NumPy"
+description = "A Python package for 3D STEP multi-body boolean alignment and Gmsh tetrahedral mesh processing."
 readme = "README.md"
 requires-python = ">=3.8"
-dependencies = [
-    "numpy",
-    "gmsh"
+license = { text = "MIT" }
+authors = [
+    { name = "G. Wang" }
 ]
+keywords = [
+    "cad",
+    "mesh",
+    "gmsh",
+    "step-file",
+    "boolean-fragment",
+    "finite-element-mesh",
+    "3d-modeling"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Mathematics"
+]
+
+# 运行基础依赖
+dependencies = [
+    "numpy>=1.20.0",
+    "gmsh>=4.10.0"
+]
+
+# 开发者与测试用可选依赖 (可以通过 pip install stepmesh[dev] 安装)
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0.0"
+]
+dev = [
+    "pytest>=7.0.0",
+    "build",
+    "twine"
+]
+
+[project.urls]
+Homepage = "https://github.com/hsu-gwang/coplanarmesh"
+Repository = "https://github.com/hsu-gwang/coplanarmesh.git"
+"Bug Tracker" = "https://github.com/hsu-gwang/coplanarmesh/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
+include = ["stepmesh*"]
+
+[tool.setuptools.package-data]
+stepmesh = ["py.typed"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q"
+testpaths = [
+    "tests"
+]
