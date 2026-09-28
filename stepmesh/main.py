@@ -1,11 +1,14 @@
-import os, sys, gmsh, numpy as np
+import os
+import sys
+import gmsh
+import numpy as np
 
 
 def step2msh(
-        step_paths: list[str],
-        output_msh_path: str,
-        min_size: float = 0.0,
-        max_size: float = 0.0,
+    step_paths: list[str],
+    output_msh_path: str,
+    min_size: float = 0.0,
+    max_size: float = 0.0,
 ) -> dict[str, list[int]]:
   """Convert a list of STEP CAD files into a 3D tetrahedral finite element mesh (.msh)
   using Gmsh. Automatically performs multi-body boolean fragment operations across all imported files to ensure matching coplanar and
@@ -30,7 +33,8 @@ def step2msh(
   gmsh.option.setNumber("General.Terminal", 1)
   gmsh.model.add("multi_body_step_mesh")
 
-  file_to_volumes = {}
+  file_to_original_vols = {}
+  orig_vol_to_filename = {}
 
   for path in step_paths:
     if not os.path.exists(path):
@@ -47,26 +51,37 @@ def step2msh(
     gmsh.model.occ.synchronize()
 
     after_vols = set(gmsh.model.getEntities(dim=3))
-    new_vols = list(after_vols - before_vols)
+    new_vols = [v[1] for v in (after_vols - before_vols)]
 
     file_name = os.path.basename(path)
-    file_to_volumes[file_name] = new_vols
+    file_to_original_vols[file_name] = new_vols
+    for v in new_vols:
+      orig_vol_to_filename[v] = file_name
 
-  if not file_to_volumes:
+  if not file_to_original_vols:
     gmsh.finalize()
-    raise ValueError("Error: No valid 3D volumes detected from the provided STEP files.")
+    raise ValueError(
+        "Error: No valid 3D volumes detected from the provided STEP files."
+    )
 
   all_volumes = []
-  for vols in file_to_volumes.values():
+  for vols in file_to_original_vols.values():
     all_volumes.extend(vols)
 
-  out_dim_tags, _ = gmsh.model.occ.fragment(all_volumes, [])
+  input_dim_tags = [(3, v) for v in all_volumes]
+  _, out_dim_tags_map = gmsh.model.occ.fragment(input_dim_tags, [])
   gmsh.model.occ.synchronize()
 
-  final_volumes = gmsh.model.getEntities(dim=3)
-  n = len(final_volumes)
+  new_vol_to_filename = {}
+  for orig_vol, sub_entities in zip(all_volumes, out_dim_tags_map):
+    fname = orig_vol_to_filename[orig_vol]
+    for dim, tag in sub_entities:
+      if dim == 3:
+        new_vol_to_filename[tag] = fname
 
-  file_to_ids_dict = {filename: [] for filename in file_to_volumes.keys()}
+  final_volumes = gmsh.model.getEntities(dim=3)
+
+  file_to_ids_dict = {filename: [] for filename in file_to_original_vols.keys()}
 
   for i, vol in enumerate(final_volumes):
     dim, tag = vol[0], vol[1]
@@ -75,18 +90,9 @@ def step2msh(
     group_name = f"Domain_{physical_tag}"
     gmsh.model.setPhysicalName(dim, physical_tag, group_name)
 
-  current_idx = 1
-  for filename, original_vols in file_to_volumes.items():
-    count = max(1, len(original_vols))
-    assigned_ids = list(range(current_idx, current_idx + count))
-    file_to_ids_dict[filename] = assigned_ids
-    current_idx += count
-
-  if current_idx - 1 < n:
-    for idx in range(current_idx, n + 1):
-      last_key = list(file_to_ids_dict.keys())[-1]
-      if idx not in file_to_ids_dict[last_key]:
-        file_to_ids_dict[last_key].append(idx)
+    fname = new_vol_to_filename.get(tag)
+    if fname and fname in file_to_ids_dict:
+      file_to_ids_dict[fname].append(physical_tag)
 
   if min_size > 0:
     gmsh.option.setNumber("Mesh.CharacteristicLengthMin", min_size)
@@ -101,35 +107,98 @@ def step2msh(
 
 
 def glue(
-        step_paths: list[str],
-        min_size: float = 0.0,
-        max_size: float = 0.0,
-        return_internal_surfaces: bool = False,
-        return_each_tet_as_body: bool = False,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, list[int]], list[dict]]:
-  """Read a list of STEP files, execute multi-body boolean gluing across all,
-  generate a 3D tetrahedral mesh in memory, extract structured NumPy arrays,
-  and return a mapping dictionary linking each STEP filename to its entity IDs.
-  If return_each_tet_as_body is True, also calculates and returns individual
-  tetrahedron centroids, maps each tet to its originating STEP file, and
-  includes all internal/external tetrahedron faces in the faces array.
+    step_paths: list[str],
+    min_size: float = 0.0,
+    max_size: float = 0.0,
+    return_internal_surfaces: bool = False,
+    return_each_tet_as_body: bool = False,
+) -> tuple:
+  """Reads multiple STEP CAD files, performs multi-body boolean operations (Fragment/Gluing),
 
-  Parameters:
-      step_paths (list[str]): A list of file paths to input CAD files.
-      min_size (float, optional): Minimum characteristic length control.
-      max_size (float, optional): Maximum characteristic length control.
-      return_internal_surfaces (bool, optional): If True, also extract internal
-        surfaces shared between tetrahedra.
-      return_each_tet_as_body (bool, optional): If True, treats each individual
-        tetrahedron as an independent body and maps them accordingly.
+  generates a 3D tetrahedral finite element mesh in memory, extracts structured
+  NumPy arrays, and establishes ownership mapping back to source files.
+
+  This function is designed for multi-component CAD mesh generation, enabling
+  conformal matching nodes across contact surfaces while tracking entity
+  ownership.
+
+  Args:
+      step_paths (list[str]): List of absolute or relative file paths to the
+        STEP CAD files.
+      min_size (float, optional): Minimum mesh size limit
+        (Mesh.CharacteristicLengthMin). Defaults to 0.0 (uses Gmsh default).
+      max_size (float, optional): Maximum mesh size limit
+        (Mesh.CharacteristicLengthMax). Defaults to 0.0 (uses Gmsh default).
+      return_internal_surfaces (bool, optional):
+        Whether to export internal shared interface meshes between contacting
+        bodies.
+          - False (default): Exports only the outer boundary skin mesh.
+          - True: Exports mesh including all internal contact interfaces (Glue
+          Interfaces).
+      return_each_tet_as_body (bool, optional): Whether to treat each
+        individual tetrahedral element as a distinct body for decomposition and
+        mapping.
+          - False (default): Groups and maps entities at the STEP file / CAD
+          volume level.
+          - True: Exports centroid coordinates at individual 3D tetrahedron
+          granularity and populates the 5th return value.
 
   Returns:
-      tuple:
-          - vertices (np.ndarray): 3D coordinates of extracted vertices.
-          - faces (np.ndarray): Triangle node indices (includes internal faces if return_each_tet_as_body=True).
-          - mapping_table (np.ndarray): Entity contact and ownership mapping table.
-          - file_to_ids_dict (dict[str, list[int]]): Mapping from filename to entity/tetrahedron IDs.
-          - tet_centroids_data (list[dict]): List containing tet IDs, centroids, and source file names.
+      tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, list[int]], list[dict]]:
+          A tuple containing 5 elements:
+
+          1. vertices (np.ndarray):
+             A float64 array of shape (N_verts, 3) representing unique 3D node
+             coordinates [x, y, z].
+
+          2. faces (np.ndarray):
+             An int64 array of shape (N_faces, 3) representing triangle element
+             vertex indices (0-based indexing relative to `vertices`).
+
+          3. mapping_table (np.ndarray):
+             An int32 array of shape (N_faces, 3) recording entity ownership
+             and adjacency relations for each triangle face:
+               - Column 0 (`pos_vol`): Positive attached Physical Volume ID (>=
+                 1).
+               - Column 1 (`neg_vol`): Negative attached Physical Volume ID.
+                 * Equal to 0: Indicates the face is an **outer boundary
+                   surface**.
+                 * Greater than 0: Indicates the face is a **shared interface
+                   connecting two bodies**.
+               - Column 2 (`local_tri_id`): Row index of the face in the `faces`
+                 array (0 to N_faces - 1).
+
+          4. file_to_ids_dict (dict[str, list[int]]):
+             A mapping dictionary where keys are STEP filenames (e.g.,
+             `"cube.step"`) and values are lists of contained Physical Volume
+             IDs (or tetrahedral Element IDs if `return_each_tet_as_body=True`).
+
+          5. tet_centroids_data (list[dict]):
+             A list of dictionaries containing tetrahedral element centroid
+             data. Populated only when `return_each_tet_as_body=True`;
+             otherwise returns an empty list `[]`. Each dictionary contains:
+               - "tet_id" (int): Global unique ID of the tetrahedral element.
+               - "centroid" (np.ndarray): 3D centroid coordinate vector [x, y,
+                 z] of shape (3,).
+               - "volume_tag" (int): Associated Gmsh geometry Volume Tag.
+               - "filename" (str): Corresponding source STEP filename.
+
+  Raises:
+      ValueError: Raised if reading input STEP files fails or if no valid 3D
+        volumes are detected.
+
+  Example:
+      >>> step_files = ["cone.step", "cube.step"]
+      >>> verts, faces, mapping, file_map, centroids = glue(
+      ...     step_paths=step_files,
+      ...     min_size=1.0,
+      ...     max_size=5.0,
+      ...     return_internal_surfaces=True,
+      ... )
+      >>> print(f"Extracted Vertices: {len(verts)}, Faces: {len(faces)}")
+      >>> print("File-to-ID Mapping:", file_map)
+      >>> # Find all faces lying on shared interfaces:
+      >>> interface_faces = mapping[mapping[:, 1] > 0]
   """
   gmsh.initialize()
   gmsh.option.setNumber("General.Terminal", 0)
@@ -153,7 +222,7 @@ def glue(
       raise ValueError(f"Failed to read STEP file {path}: {e}")
     gmsh.model.occ.synchronize()
     after_vols = set(gmsh.model.getEntities(dim=3))
-    new_vols = list(after_vols - before_vols)
+    new_vols = [v[1] for v in (after_vols - before_vols)]
 
     fname = os.path.basename(path)
     file_to_original_vols[fname] = new_vols
@@ -164,24 +233,33 @@ def glue(
   for vols in file_to_original_vols.values():
     all_volumes.extend(vols)
 
+  new_vol_to_filename = {}
   if all_volumes:
-    gmsh.model.occ.fragment(all_volumes, [])
+    input_dim_tags = [(3, v) for v in all_volumes]
+    _, out_dim_tags_map = gmsh.model.occ.fragment(input_dim_tags, [])
     gmsh.model.occ.synchronize()
 
+    for orig_vol, sub_entities in zip(all_volumes, out_dim_tags_map):
+      fname = orig_vol_to_filename[orig_vol]
+      for dim, tag in sub_entities:
+        if dim == 3:
+          new_vol_to_filename[tag] = fname
+
   geom_volumes = gmsh.model.getEntities(dim=3)
-  n = len(geom_volumes)
 
   vol_tag_to_physical_id = {}
+  vol_tag_to_filename = {}
+
   for i, vol in enumerate(geom_volumes):
     dim, tag = vol[0], vol[1]
     physical_tag = i + 1
     gmsh.model.addPhysicalGroup(dim, [tag], physical_tag)
     gmsh.model.setPhysicalName(dim, physical_tag, f"Domain_{physical_tag}")
     vol_tag_to_physical_id[tag] = physical_tag
+    vol_tag_to_filename[tag] = new_vol_to_filename.get(tag, "unknown")
 
   gmsh.model.mesh.generate(3)
 
-  # 获取所有节点坐标用于计算中心和顶点
   node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
   coord_array = np.zeros((int(np.max(node_tags)) + 1, 3), dtype=np.float64)
   coord_array[node_tags] = node_coords.reshape(-1, 3)
@@ -189,34 +267,34 @@ def glue(
   file_to_ids_dict = {fname: [] for fname in file_to_original_vols.keys()}
   tet_centroids_data = []
 
-  # 如果开启了每个四面体作为一个独立的 body
   if return_each_tet_as_body:
-    elem_types_3d, elem_tags_3d, elem_node_tags_3d = gmsh.model.mesh.getElements(3)
+    elem_types_3d, elem_tags_3d, elem_node_tags_3d = (
+        gmsh.model.mesh.getElements(3)
+    )
 
     face_to_vols = {}
-    for etype, tags, node_tags_list in zip(elem_types_3d, elem_tags_3d, elem_node_tags_3d):
-      if etype == 4:  # 4节点四面体
+    for etype, tags, node_tags_list in zip(
+        elem_types_3d, elem_tags_3d, elem_node_tags_3d
+    ):
+      if etype == 4:
         nodes_matrix = node_tags_list.reshape(-1, 4)
         for tet_tag, tet_nodes in zip(tags, nodes_matrix):
           tet_id = int(tet_tag)
 
-          # 计算四面体中心坐标
           p0 = coord_array[tet_nodes[0]]
           p1 = coord_array[tet_nodes[1]]
           p2 = coord_array[tet_nodes[2]]
           p3 = coord_array[tet_nodes[3]]
           centroid = (p0 + p1 + p2 + p3) / 4.0
 
-          # 获取该四面体所属的几何实体 (Volume)
           _, _, _, vol_geom_tag = gmsh.model.mesh.getElement(tet_tag)
           vol_phys_id = vol_tag_to_physical_id.get(vol_geom_tag, 1)
 
-          # 收集四面体的 4 个面以便后续构建包含内部面的 faces
           faces_of_tet = [
-            tuple(sorted((tet_nodes[0], tet_nodes[1], tet_nodes[2]))),
-            tuple(sorted((tet_nodes[0], tet_nodes[3], tet_nodes[1]))),
-            tuple(sorted((tet_nodes[0], tet_nodes[2], tet_nodes[3]))),
-            tuple(sorted((tet_nodes[1], tet_nodes[3], tet_nodes[2]))),
+              tuple(sorted((tet_nodes[0], tet_nodes[1], tet_nodes[2]))),
+              tuple(sorted((tet_nodes[0], tet_nodes[3], tet_nodes[1]))),
+              tuple(sorted((tet_nodes[0], tet_nodes[2], tet_nodes[3]))),
+              tuple(sorted((tet_nodes[1], tet_nodes[3], tet_nodes[2]))),
           ]
           for f_nodes in faces_of_tet:
             if f_nodes not in face_to_vols:
@@ -224,34 +302,18 @@ def glue(
             if vol_phys_id not in face_to_vols[f_nodes]:
               face_to_vols[f_nodes].append(vol_phys_id)
 
-          # 溯源原始文件名
-          source_file = "unknown"
-          try:
-            ancestors = gmsh.model.occ.getAncestor(3, vol_geom_tag)
-            if ancestors:
-              for anc in ancestors:
-                if anc in orig_vol_to_filename:
-                  source_file = orig_vol_to_filename[anc]
-                  break
-          except Exception:
-            pass
-
-          if source_file == "unknown" and file_to_original_vols:
-            source_file = list(file_to_original_vols.keys())[0]
+          source_file = vol_tag_to_filename.get(vol_geom_tag, "unknown")
 
           if source_file in file_to_ids_dict:
             file_to_ids_dict[source_file].append(tet_id)
-          else:
-            file_to_ids_dict[source_file] = [tet_id]
 
           tet_centroids_data.append({
-            "tet_id": tet_id,
-            "centroid": centroid,
-            "volume_tag": int(vol_geom_tag),
-            "filename": source_file
+              "tet_id": tet_id,
+              "centroid": centroid,
+              "volume_tag": int(vol_geom_tag),
+              "filename": source_file,
           })
 
-    # 当 return_each_tet_as_body=True 时，直接由四面体推导所有内/外表面
     raw_faces = []
     mapping_table = []
     for local_tri_id, (f_nodes, vols) in enumerate(face_to_vols.items()):
@@ -264,23 +326,19 @@ def glue(
     mapping_table = np.array(mapping_table, dtype=np.int32)
 
   else:
-    # 未开启时执行原有的表面提取或 internal_surfaces 逻辑
-    current_idx = 1
-    for filename, original_vols in file_to_original_vols.items():
-      count = max(1, len(original_vols))
-      assigned_ids = list(range(current_idx, current_idx + count))
-      file_to_ids_dict[filename] = assigned_ids
-      current_idx += count
-
-    for idx in range(current_idx, n + 1):
-      last_key = list(file_to_ids_dict.keys())[-1]
-      if idx not in file_to_ids_dict[last_key]:
-        file_to_ids_dict[last_key].append(idx)
+    for vol_geom_tag, phys_id in vol_tag_to_physical_id.items():
+      fname = vol_tag_to_filename.get(vol_geom_tag)
+      if fname and fname in file_to_ids_dict:
+        file_to_ids_dict[fname].append(phys_id)
 
     if return_internal_surfaces:
-      elem_types_3d, elem_tags_3d, elem_node_tags_3d = gmsh.model.mesh.getElements(3)
+      elem_types_3d, elem_tags_3d, elem_node_tags_3d = (
+          gmsh.model.mesh.getElements(3)
+      )
       face_to_vols = {}
-      for etype, tags, node_tags_list in zip(elem_types_3d, elem_tags_3d, elem_node_tags_3d):
+      for etype, tags, node_tags_list in zip(
+          elem_types_3d, elem_tags_3d, elem_node_tags_3d
+      ):
         if etype == 4:
           nodes_matrix = node_tags_list.reshape(-1, 4)
           for tet_tag, tet_nodes in zip(tags, nodes_matrix):
@@ -288,10 +346,10 @@ def glue(
             vol_phys_id = vol_tag_to_physical_id.get(vol_geom_tag, 1)
 
             faces_of_tet = [
-              tuple(sorted((tet_nodes[0], tet_nodes[1], tet_nodes[2]))),
-              tuple(sorted((tet_nodes[0], tet_nodes[3], tet_nodes[1]))),
-              tuple(sorted((tet_nodes[0], tet_nodes[2], tet_nodes[3]))),
-              tuple(sorted((tet_nodes[1], tet_nodes[3], tet_nodes[2]))),
+                tuple(sorted((tet_nodes[0], tet_nodes[1], tet_nodes[2]))),
+                tuple(sorted((tet_nodes[0], tet_nodes[3], tet_nodes[1]))),
+                tuple(sorted((tet_nodes[0], tet_nodes[2], tet_nodes[3]))),
+                tuple(sorted((tet_nodes[1], tet_nodes[3], tet_nodes[2]))),
             ]
             for f_nodes in faces_of_tet:
               if f_nodes not in face_to_vols:
@@ -315,7 +373,9 @@ def glue(
         vol_geom_tag = vol[1]
         vol_phys_id = vol_tag_to_physical_id[vol_geom_tag]
 
-        boundaries = gmsh.model.getBoundary([vol], combined=False, oriented=True)
+        boundaries = gmsh.model.getBoundary(
+            [vol], combined=False, oriented=True
+        )
         for b in boundaries:
           if b[0] == 2:
             signed_surf_tag = int(b[1])
@@ -331,7 +391,9 @@ def glue(
       local_tri_id = 0
 
       for surf_tag, owners in surf_ownership.items():
-        elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(2, surf_tag)
+        elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(
+            2, surf_tag
+        )
 
         for i, etype in enumerate(elem_types):
           if etype == 2:
@@ -343,9 +405,13 @@ def glue(
               vol_id, is_reversed = owners[0]
 
               if is_reversed:
-                face_nodes = np.array([nodes[0], nodes[2], nodes[1]], dtype=np.int64)
+                face_nodes = np.array(
+                    [nodes[0], nodes[2], nodes[1]], dtype=np.int64
+                )
               else:
-                face_nodes = np.array([nodes[0], nodes[1], nodes[2]], dtype=np.int64)
+                face_nodes = np.array(
+                    [nodes[0], nodes[1], nodes[2]], dtype=np.int64
+                )
 
               pos_vol = vol_id
               neg_vol = owners[1][0] if len(owners) > 1 else 0
@@ -365,10 +431,8 @@ def glue(
 
   gmsh.finalize()
 
-  if return_each_tet_as_body:
-    return vertices, faces, mapping_table, file_to_ids_dict, tet_centroids_data
-
-  return vertices, faces, mapping_table, file_to_ids_dict
+  # 始终固定返回 5 个值，保证无论怎么调用解包都不会报错
+  return vertices, faces, mapping_table, file_to_ids_dict, tet_centroids_data
 
 
 def vf2stl(
@@ -396,7 +460,11 @@ def vf2stl(
     header = b"Exported by NumPy & Gmsh Workflow"
     header = header.ljust(80, b"\0")
 
-    dtype = np.dtype([("normal", "<f4", (3,)), ("vertices", "<f4", (3, 3)), ("attr", "<u2")])
+    dtype = np.dtype([
+        ("normal", "<f4", (3,)),
+        ("vertices", "<f4", (3, 3)),
+        ("attr", "<u2"),
+    ])
 
     facet_array = np.zeros(n_faces, dtype=dtype)
     facet_array["normal"] = normals
@@ -426,9 +494,7 @@ def vf2stl(
 
 
 def msh2unv(msh_path: str, unv_path: str) -> str:
-  """
-  Convert a Gmsh .msh file to an I-deas .unv file for FreeCAD FEM workbench.
-  """
+  """Convert a Gmsh .msh file to an I-deas .unv file for FreeCAD FEM workbench."""
   if not os.path.exists(msh_path):
     raise FileNotFoundError(f"Input MSH file not found: {msh_path}")
 
@@ -458,15 +524,8 @@ def msh2unv(msh_path: str, unv_path: str) -> str:
   return os.path.abspath(unv_path)
 
 
-import os
-import gmsh
-import numpy as np
-
-
 def msh2stl(msh_path: str, stl_path: str) -> str:
-  """
-  直接从 .msh 文件的四面体网格中提取外部包络三角形面，并写入标准的 STL 文件。
-  """
+  """直接从 .msh 文件的四面体网格中提取外部包络三角形面，并写入标准的 STL 文件。"""
   if not os.path.exists(msh_path):
     raise FileNotFoundError(f"Input MSH file not found: {msh_path}")
 
@@ -479,46 +538,37 @@ def msh2stl(msh_path: str, stl_path: str) -> str:
     gmsh.option.setNumber("General.Terminal", 0)
     gmsh.open(msh_path)
 
-    # 1. 获取所有节点坐标
     node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
     node_map = {tag: i for i, tag in enumerate(node_tags)}
     nodes = node_coords.reshape(-1, 3)
 
-    # 2. 获取所有 3D 四面体单元 (Element type 4 代表 4节点四面体)
     elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(dim=3)
 
     tets = []
     for e_type, e_nodes in zip(elem_types, elem_node_tags):
-      if e_type == 4:  # 4-node tetrahedron
+      if e_type == 4:
         tets = e_nodes.reshape(-1, 4)
         break
 
     if len(tets) == 0:
       raise RuntimeError("No 3D tetrahedral elements found in the mesh file.")
 
-    # 3. 提取所有四面体的 4 个边界三角形面，并统计出现次数
-    # 内部共享面会出现 2 次，而只出现 1 次的面就是外部边界
     face_count = {}
 
     for tet in tets:
-      # 映射为 0-based 索引
       p = [node_map[tag] for tag in tet]
-      # 四面体的 4 个面组合（注意保持一致的顶点顺时针/逆时针走向）
       sub_faces = [
-        (p[0], p[2], p[1]),
-        (p[0], p[1], p[3]),
-        (p[1], p[2], p[3]),
-        (p[2], p[0], p[3])
+          (p[0], p[2], p[1]),
+          (p[0], p[1], p[3]),
+          (p[1], p[2], p[3]),
+          (p[2], p[0], p[3]),
       ]
       for f in sub_faces:
-        # 对顶点进行排序组合作为无向边的 key，或者直接记录定向面
-        # 为了统计边界，使用有序化小技巧：对内部面正反各出现一次
         sorted_f = tuple(sorted(f))
         if sorted_f not in face_count:
           face_count[sorted_f] = []
         face_count[sorted_f].append(f)
 
-    # 筛选出只出现一次的面（即外表面）
     boundary_triangles = []
     for sorted_f, f_list in face_count.items():
       if len(f_list) == 1:
@@ -528,15 +578,13 @@ def msh2stl(msh_path: str, stl_path: str) -> str:
     if output_dir and not os.path.exists(output_dir):
       os.makedirs(output_dir)
 
-    # 4. 手动写入标准的 ASCII STL 文件
-    with open(stl_path, 'w') as f:
+    with open(stl_path, "w") as f:
       f.write("solid GmshModel\n")
       for tri in boundary_triangles:
         pt0 = nodes[tri[0]]
         pt1 = nodes[tri[1]]
         pt2 = nodes[tri[2]]
 
-        # 简单计算法向量（可选，填 0 也可以，这里写 0 释放通用兼容性）
         f.write("  facet normal 0.0 0.0 0.0\n")
         f.write("    outer loop\n")
         f.write(f"      vertex {pt0[0]} {pt0[1]} {pt0[2]}\n")
