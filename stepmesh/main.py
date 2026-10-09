@@ -431,7 +431,6 @@ def glue(
 
   gmsh.finalize()
 
-  # 始终固定返回 5 个值，保证无论怎么调用解包都不会报错
   return vertices, faces, mapping_table, file_to_ids_dict, tet_centroids_data
 
 
@@ -525,7 +524,6 @@ def msh2unv(msh_path: str, unv_path: str) -> str:
 
 
 def msh2stl(msh_path: str, stl_path: str) -> str:
-  """直接从 .msh 文件的四面体网格中提取外部包络三角形面，并写入标准的 STL 文件。"""
   if not os.path.exists(msh_path):
     raise FileNotFoundError(f"Input MSH file not found: {msh_path}")
 
