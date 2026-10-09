@@ -16,7 +16,7 @@ A Python package for processing 3D STEP/CAD files, performing multi-body boolean
 You can install `stepmesh` directly from GitHub using `pip`:
 
 ```bash
-pip install git+[https://github.com/gwangcode/stepmesh.git](https://github.com/gwangcode/stepmesh.git)
+pip install git+https://github.com/gwangcode/stepmesh.git
 
 ```
 
