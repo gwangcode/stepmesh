@@ -9,6 +9,7 @@ A Python package for processing 3D STEP/CAD files, performing multi-body boolean
 - **Multi-body STEP Mesh Generation**: Automatically fragment and glue multi-body STEP files to ensure continuous and matching contact interfaces.
 - **Mesh Data Extraction**: Extract NumPy arrays for vertices, triangle faces, mapping tables, and tetrahedron centroids directly in memory.
 - **Format Conversion**: Convert Gmsh `.msh` files to `.unv` (compatible with FreeCAD FEM workbench) and export to STL formats.
+- **STEP/CAD integration** — Convert multi-body STEP assemblies remeshed by [`stepmesh`](https://github.com/gwangcode/stepmesh) via a lightweight adapter (`georay.stepmesh_adapter`).
 
 ## Installation
 
@@ -18,7 +19,6 @@ You can install `stepmesh` directly from GitHub using `pip`:
 pip install git+[https://github.com/gwangcode/stepmesh.git](https://github.com/gwangcode/stepmesh.git)
 
 ```
-
 
 ## Quick Start
 
