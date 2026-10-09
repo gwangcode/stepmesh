@@ -36,13 +36,11 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Mathematics"
 ]
 
-# 运行基础依赖
 dependencies = [
     "numpy>=1.20.0",
     "gmsh>=4.10.0"
 ]
 
-# 开发者与测试用可选依赖 (可以通过 pip install stepmesh[dev] 安装)
 [project.optional-dependencies]
 test = [
     "pytest>=7.0.0"
@@ -54,9 +52,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/hsu-gwang/coplanarmesh"
-Repository = "https://github.com/hsu-gwang/coplanarmesh.git"
-"Bug Tracker" = "https://github.com/hsu-gwang/coplanarmesh/issues"
+Homepage = "https://github.com/gwangcode/coplanarmesh"
+Repository = "https://github.com/gwangcode/coplanarmesh.git"
+"Bug Tracker" = "https://github.com/gwangcode/coplanarmesh/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
