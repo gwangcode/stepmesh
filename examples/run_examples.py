@@ -2,10 +2,8 @@ from pathlib import Path
 from stepmesh import step2msh, glue, vf2stl, msh2unv, msh2stl
 
 if __name__ == "__main__":
-    # 获取当前脚本所在目录 (examples/ 目录)
     examples_dir = Path(__file__).parent.resolve()
 
-    # 自动定位同目录下的示例 STEP 文件
     step_paths = [
         str(examples_dir / "cone.step"),
         str(examples_dir / "cube.step"),
