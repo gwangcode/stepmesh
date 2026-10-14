@@ -22,7 +22,7 @@ def _record_volume_centroids():
 
 
 def _rebuild_volume_to_filename(old_vol_to_filename, old_centroids):
-  """removeAllDuplicates 之后，用质心最近邻把旧 tag→filename 映射到新 tag。"""
+  """removeAllDuplicates 之后，用质心最近邻把旧 tag->filename 映射到新 tag。"""
   new_map = {}
   for _, tag in gmsh.model.getEntities(dim=3):
     try:
@@ -49,6 +49,34 @@ def _rebuild_volume_to_filename(old_vol_to_filename, old_centroids):
   return new_map
 
 
+def _fragment_all_volumes(all_volumes):
+  """对多个实体做 fragment 操作，正确切开互相接触的实体。
+
+  关键：必须用 fragment([first], rest) 而不是 fragment(all, [])。
+  后者在 Gmsh 中不会切开互相接触的实体。
+
+  返回 frag_vol_tag -> orig_vol_tag 的映射。
+  """
+  result = {}
+  if len(all_volumes) == 0:
+    return result
+  if len(all_volumes) == 1:
+    result[all_volumes[0]] = all_volumes[0]
+    return result
+
+  objects = [(3, all_volumes[0])]
+  tools = [(3, v) for v in all_volumes[1:]]
+  _, out_map = gmsh.model.occ.fragment(objects, tools)
+  gmsh.model.occ.synchronize()
+
+  for i, sub in enumerate(out_map):
+    orig = all_volumes[i]
+    for dim, tag in sub:
+      if dim == 3:
+        result[tag] = orig
+  return result
+
+
 def step2msh(
     step_paths: list[str],
     output_msh_path: str,
@@ -62,17 +90,17 @@ def step2msh(
   Parameters:
       step_paths (list[str]): A list of file paths to input CAD files.
         Supported formats include STEP (.step, .stp), BREP (.brep), IGES
-        (.iges, .igs), and other Gmsh-compatible 3D solid formats[cite: 4]
+        (.iges, .igs), and other Gmsh-compatible 3D solid formats.
       output_msh_path (str): The file path where the generated MSH file will be
-        saved[cite: 4].
+        saved.
       min_size (float, optional): The minimum characteristic length control.
-        Defaults to 0.0[cite: 4].
+        Defaults to 0.0.
       max_size (float, optional): The maximum characteristic length control.
-        Defaults to 0.0[cite: 4].
+        Defaults to 0.0.
 
   Returns:
       dict[str, list[int]]: A dictionary mapping each STEP filename to its
-      corresponding assigned physical entity IDs (1-based)[cite: 4].
+      corresponding assigned physical entity IDs (1-based).
   """
   gmsh.initialize()
   gmsh.option.setNumber("General.Terminal", 1)
@@ -113,26 +141,16 @@ def step2msh(
   for vols in file_to_original_vols.values():
     all_volumes.extend(vols)
 
-  input_dim_tags = [(3, v) for v in all_volumes]
-  _, out_dim_tags_map = gmsh.model.occ.fragment(input_dim_tags, [])
-  gmsh.model.occ.synchronize()
+  frag_vol_to_orig = _fragment_all_volumes(all_volumes)
+  new_vol_to_filename = {
+      t: orig_vol_to_filename[o] for t, o in frag_vol_to_orig.items()
+  }
 
-  # ---- fragment 之后，removeAllDuplicates 之前，先建立 tag -> filename ----
-  new_vol_to_filename = {}
-  for orig_vol, sub_entities in zip(all_volumes, out_dim_tags_map):
-    fname = orig_vol_to_filename[orig_vol]
-    for dim, tag in sub_entities:
-      if dim == 3:
-        new_vol_to_filename[tag] = fname
-
-  # ---- 记录 fragment 后每个 volume 的质心 ----
   frag_vol_centroids = _record_volume_centroids()
 
-  # ---- 合并几何上完全重合的 volume / surface ----
   gmsh.model.occ.removeAllDuplicates()
   gmsh.model.occ.synchronize()
 
-  # ---- 用质心最近邻重建 vol_tag -> filename（tag 已被重排） ----
   new_vol_to_filename = _rebuild_volume_to_filename(
       new_vol_to_filename, frag_vol_centroids
   )
@@ -291,26 +309,16 @@ def glue(
   for vols in file_to_original_vols.values():
     all_volumes.extend(vols)
 
-  new_vol_to_filename = {}
-  if all_volumes:
-    input_dim_tags = [(3, v) for v in all_volumes]
-    _, out_dim_tags_map = gmsh.model.occ.fragment(input_dim_tags, [])
-    gmsh.model.occ.synchronize()
+  frag_vol_to_orig = _fragment_all_volumes(all_volumes)
+  new_vol_to_filename = {
+      t: orig_vol_to_filename[o] for t, o in frag_vol_to_orig.items()
+  }
 
-    for orig_vol, sub_entities in zip(all_volumes, out_dim_tags_map):
-      fname = orig_vol_to_filename[orig_vol]
-      for dim, tag in sub_entities:
-        if dim == 3:
-          new_vol_to_filename[tag] = fname
-
-  # ---- 记录 fragment 后每个 volume 的质心 ----
   frag_vol_centroids = _record_volume_centroids()
 
-  # ---- 合并几何上完全重合的 volume / surface ----
   gmsh.model.occ.removeAllDuplicates()
   gmsh.model.occ.synchronize()
 
-  # ---- 用质心最近邻重建 vol_tag -> filename ----
   new_vol_to_filename = _rebuild_volume_to_filename(
       new_vol_to_filename, frag_vol_centroids
   )
