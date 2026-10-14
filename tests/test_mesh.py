@@ -71,6 +71,20 @@ def assert_nonmanifold_free(v, f):
         f"edges with count != 2: {sum(1 for c in ec.values() if c != 2)}"
 
 
+def load_stl_watertight(stl_path):
+    """Load an STL file and restore topology by merging coincident vertices.
+
+    STL stores only raw triangle vertex coordinates with no vertex-sharing
+    information; every loader must merge coincident vertices to recover
+    the underlying topology. ``process=False`` disables that, so we do it
+    explicitly via ``merge_vertices()``.
+    """
+    trimesh = pytest.importorskip("trimesh")
+    m = trimesh.load(str(stl_path), process=False)
+    m.merge_vertices()
+    return m
+
+
 # ---------------------------------------------------------------------------
 # glue() basic
 # ---------------------------------------------------------------------------
@@ -267,13 +281,21 @@ def test_vf2stl_binary_roundtrip(tmp_path, trio_paths):
 
 
 def test_msh2stl_produces_watertight(tmp_path, trio_paths):
-    trimesh = pytest.importorskip("trimesh")
+    """msh2stl output, after STL vertex merging, must be watertight.
+
+    STL does not store topology, so the loader must merge coincident
+    vertices to reconstruct connectivity. We do that explicitly.
+    """
     msh = tmp_path / "m.msh"
     step2msh(trio_paths, str(msh), min_size=0.3, max_size=1.0)
     stl = tmp_path / "m.stl"
     msh2stl(str(msh), str(stl))
-    m = trimesh.load(str(stl), process=False)
-    assert m.is_watertight
+
+    m = load_stl_watertight(stl)
+    assert m.is_watertight, (
+        f"after merge_vertices: V={len(m.vertices)} F={len(m.faces)} "
+        f"euler={m.euler_number}"
+    )
 
 
 # ---------------------------------------------------------------------------
