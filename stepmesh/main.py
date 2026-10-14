@@ -72,6 +72,9 @@ def step2msh(
   _, out_dim_tags_map = gmsh.model.occ.fragment(input_dim_tags, [])
   gmsh.model.occ.synchronize()
 
+  gmsh.model.occ.removeAllDuplicates()
+  gmsh.model.occ.synchronize()
+
   new_vol_to_filename = {}
   for orig_vol, sub_entities in zip(all_volumes, out_dim_tags_map):
     fname = orig_vol_to_filename[orig_vol]
