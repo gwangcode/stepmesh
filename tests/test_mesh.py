@@ -6,7 +6,7 @@ from stepmesh import step2msh, glue, vf2stl, msh2unv, msh2stl
 
 
 @pytest.fixture(scope="module")
-def sample_step_paths()
+def sample_step_paths():
     base_dir = Path(__file__).parent.parent / "examples"
     paths = [
         str(base_dir / "cone.step"),
