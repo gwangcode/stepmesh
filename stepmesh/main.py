@@ -5,7 +5,7 @@ import numpy as np
 
 
 def _record_volume_centroids():
-  """记录当前模型里所有 volume 的质心（用于 removeAllDuplicates 后重建映射）。"""
+  """记录当前模型里所有 volume 的质心。"""
   centroids = {}
   for _, tag in gmsh.model.getEntities(dim=3):
     try:
@@ -50,12 +50,10 @@ def _rebuild_volume_to_filename(old_vol_to_filename, old_centroids):
 
 
 def _fragment_all_volumes(all_volumes):
-  """对多个实体做 fragment 操作，正确切开互相接触的实体。
+  """用 fragment([first], rest) 正确切开互相接触的实体。
 
-  关键：必须用 fragment([first], rest) 而不是 fragment(all, [])。
-  后者在 Gmsh 中不会切开互相接触的实体。
-
-  返回 frag_vol_tag -> orig_vol_tag 的映射。
+  注意：fragment(all, []) 在 Gmsh 中不会切开互相接触的实体，
+  必须把第一个作为 object，其余作为 tool。
   """
   result = {}
   if len(all_volumes) == 0:
@@ -83,24 +81,16 @@ def step2msh(
     min_size: float = 0.0,
     max_size: float = 0.0,
 ) -> dict[str, list[int]]:
-  """Convert a list of STEP CAD files into a 3D tetrahedral finite element mesh (.msh)
-  using Gmsh. Automatically performs multi-body boolean fragment operations across all imported files to ensure matching coplanar and
-  contact surfaces.
+  """Convert a list of STEP CAD files into a 3D tetrahedral finite element mesh (.msh).
 
   Parameters:
       step_paths (list[str]): A list of file paths to input CAD files.
-        Supported formats include STEP (.step, .stp), BREP (.brep), IGES
-        (.iges, .igs), and other Gmsh-compatible 3D solid formats.
-      output_msh_path (str): The file path where the generated MSH file will be
-        saved.
-      min_size (float, optional): The minimum characteristic length control.
-        Defaults to 0.0.
-      max_size (float, optional): The maximum characteristic length control.
-        Defaults to 0.0.
+      output_msh_path (str): The file path where the generated MSH file will be saved.
+      min_size (float, optional): Minimum characteristic length. Defaults to 0.0.
+      max_size (float, optional): Maximum characteristic length. Defaults to 0.0.
 
   Returns:
-      dict[str, list[int]]: A dictionary mapping each STEP filename to its
-      corresponding assigned physical entity IDs (1-based).
+      dict[str, list[int]]: Mapping each STEP filename to its physical entity IDs.
   """
   gmsh.initialize()
   gmsh.option.setNumber("General.Terminal", 1)
@@ -189,92 +179,34 @@ def glue(
     return_internal_surfaces: bool = False,
     return_each_tet_as_body: bool = False,
 ) -> tuple:
-  """Reads multiple STEP CAD files, performs multi-body boolean operations (Fragment/Gluing),
-
-  generates a 3D tetrahedral finite element mesh in memory, extracts structured
-  NumPy arrays, and establishes ownership mapping back to source files.
-
-  This function is designed for multi-component CAD mesh generation, enabling
-  conformal matching nodes across contact surfaces while tracking entity
-  ownership.
+  """Reads multiple STEP CAD files, performs multi-body boolean operations
+  (Fragment + removeAllDuplicates), generates a 3D tetrahedral finite element
+  mesh in memory, extracts structured NumPy arrays, and establishes ownership
+  mapping back to source files.
 
   Args:
-      step_paths (list[str]): List of absolute or relative file paths to the
-        STEP CAD files.
-      min_size (float, optional): Minimum mesh size limit
-        (Mesh.CharacteristicLengthMin). Defaults to 0.0 (uses Gmsh default).
-      max_size (float, optional): Maximum mesh size limit
-        (Mesh.CharacteristicLengthMax). Defaults to 0.0 (uses Gmsh default).
+      step_paths (list[str]): List of STEP file paths.
+      min_size (float, optional): Minimum mesh size. Defaults to 0.0.
+      max_size (float, optional): Maximum mesh size. Defaults to 0.0.
       return_internal_surfaces (bool, optional):
-        Whether to export internal shared interface meshes between contacting
-        bodies.
-          - False (default): Exports only the outer boundary skin mesh.
-          - True: Exports mesh including all internal contact interfaces (Glue
-          Interfaces).
-      return_each_tet_as_body (bool, optional): Whether to treat each
-        individual tetrahedral element as a distinct body for decomposition and
-        mapping.
-          - False (default): Groups and maps entities at the STEP file / CAD
-          volume level.
-          - True: Exports centroid coordinates at individual 3D tetrahedron
-          granularity and populates the 5th return value.
+          - False (default): Export only the outer boundary skin mesh
+            (guaranteed watertight).
+          - True: Export mesh including internal contact interfaces
+            (shared faces shared by two volumes).
+      return_each_tet_as_body (bool, optional): Whether to emit per-tet
+        centroid data.
 
   Returns:
-      tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, list[int]], list[dict]]:
-          A tuple containing 5 elements:
+      tuple: (vertices, faces, mapping_table, file_to_ids_dict,
+              tet_centroids_data)
 
-          1. vertices (np.ndarray):
-             A float64 array of shape (N_verts, 3) representing unique 3D node
-             coordinates [x, y, z].
-
-          2. faces (np.ndarray):
-             An int64 array of shape (N_faces, 3) representing triangle element
-             vertex indices (0-based indexing relative to `vertices`).
-
-          3. mapping_table (np.ndarray):
-             An int32 array of shape (N_faces, 3) recording entity ownership
-             and adjacency relations for each triangle face:
-               - Column 0 (`pos_vol`): Positive attached Physical Volume ID (>=
-                 1).
-               - Column 1 (`neg_vol`): Negative attached Physical Volume ID.
-                 * Equal to 0: Indicates the face is an **outer boundary
-                   surface**.
-                 * Greater than 0: Indicates the face is a **shared interface
-                   connecting two bodies**.
-               - Column 2 (`local_tri_id`): Row index of the face in the `faces`
-                 array (0 to N_faces - 1).
-
-          4. file_to_ids_dict (dict[str, list[int]]):
-             A mapping dictionary where keys are STEP filenames (e.g.,
-             `"cube.step"`) and values are lists of contained Physical Volume
-             IDs (or tetrahedral Element IDs if `return_each_tet_as_body=True`).
-
-          5. tet_centroids_data (list[dict]):
-             A list of dictionaries containing tetrahedral element centroid
-             data. Populated only when `return_each_tet_as_body=True`;
-             otherwise returns an empty list `[]`. Each dictionary contains:
-               - "tet_id" (int): Global unique ID of the tetrahedral element.
-               - "centroid" (np.ndarray): 3D centroid coordinate vector [x, y,
-                 z] of shape (3,).
-               - "volume_tag" (int): Associated Gmsh geometry Volume Tag.
-               - "filename" (str): Corresponding source STEP filename.
-
-  Raises:
-      ValueError: Raised if reading input STEP files fails or if no valid 3D
-        volumes are detected.
-
-  Example:
-      >>> step_files = ["cone.step", "cube.step"]
-      >>> verts, faces, mapping, file_map, centroids = glue(
-      ...     step_paths=step_files,
-      ...     min_size=1.0,
-      ...     max_size=5.0,
-      ...     return_internal_surfaces=True,
-      ... )
-      >>> print(f"Extracted Vertices: {len(verts)}, Faces: {len(faces)}")
-      >>> print("File-to-ID Mapping:", file_map)
-      >>> # Find all faces lying on shared interfaces:
-      >>> interface_faces = mapping[mapping[:, 1] > 0]
+          - vertices (np.ndarray): (N_verts, 3) float64 node coords.
+          - faces (np.ndarray): (N_faces, 3) int64 triangle indices.
+          - mapping_table (np.ndarray): (N_faces, 3) int32:
+              [pos_vol, neg_vol, local_tri_id]
+              neg_vol == 0 means outer boundary, > 0 means shared interface.
+          - file_to_ids_dict (dict[str, list[int]]): filename -> physical IDs.
+          - tet_centroids_data (list[dict]): per-tet centroid data.
   """
   gmsh.initialize()
   gmsh.option.setNumber("General.Terminal", 0)
@@ -409,97 +341,60 @@ def glue(
       if fname and fname in file_to_ids_dict:
         file_to_ids_dict[fname].append(phys_id)
 
-    if return_internal_surfaces:
-      elem_types_3d, elem_tags_3d, elem_node_tags_3d = (
-          gmsh.model.mesh.getElements(3)
+    # 用几何层面的 surface 归属关系提取网格。
+    # - return_internal_surfaces=False: 跳过被多个 volume 共享的接口面，
+    #   只输出外表面，结果 watertight。
+    # - return_internal_surfaces=True: 包含共享接口面（一份几何被两个
+    #   volume 引用），映射表里 neg_vol > 0 标记共享面。
+    surf_ownership = {}
+    for vol in geom_volumes:
+      vol_geom_tag = vol[1]
+      vol_phys_id = vol_tag_to_physical_id[vol_geom_tag]
+      for b in gmsh.model.getBoundary([vol], combined=False, oriented=True):
+        if b[0] == 2:
+          signed_surf_tag = int(b[1])
+          surf_tag = abs(signed_surf_tag)
+          is_reversed = signed_surf_tag < 0
+          surf_ownership.setdefault(surf_tag, []).append(
+              (vol_phys_id, is_reversed))
+
+    raw_faces = []
+    mapping_table = []
+    local_tri_id = 0
+
+    for surf_tag, owners in surf_ownership.items():
+      if not return_internal_surfaces and len(owners) > 1:
+        continue  # 跳过共享接口面，保证外表面 watertight
+      elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(
+          2, surf_tag
       )
-      face_to_vols = {}
-      for etype, tags, node_tags_list in zip(
-          elem_types_3d, elem_tags_3d, elem_node_tags_3d
-      ):
-        if etype == 4:
-          nodes_matrix = node_tags_list.reshape(-1, 4)
-          for tet_tag, tet_nodes in zip(tags, nodes_matrix):
-            _, _, _, vol_geom_tag = gmsh.model.mesh.getElement(tet_tag)
-            vol_phys_id = vol_tag_to_physical_id.get(vol_geom_tag, 1)
+      for i, etype in enumerate(elem_types):
+        if etype == 2:
+          t_tags = elem_tags[i]
+          n_tags = elem_node_tags[i].reshape(-1, 3)
 
-            faces_of_tet = [
-                tuple(sorted((tet_nodes[0], tet_nodes[1], tet_nodes[2]))),
-                tuple(sorted((tet_nodes[0], tet_nodes[3], tet_nodes[1]))),
-                tuple(sorted((tet_nodes[0], tet_nodes[2], tet_nodes[3]))),
-                tuple(sorted((tet_nodes[1], tet_nodes[3], tet_nodes[2]))),
-            ]
-            for f_nodes in faces_of_tet:
-              if f_nodes not in face_to_vols:
-                face_to_vols[f_nodes] = []
-              if vol_phys_id not in face_to_vols[f_nodes]:
-                face_to_vols[f_nodes].append(vol_phys_id)
+          for j, _ in enumerate(t_tags):
+            nodes = n_tags[j]
+            vol_id, is_reversed = owners[0]
 
-      raw_faces = []
-      mapping_table = []
-      for local_tri_id, (f_nodes, vols) in enumerate(face_to_vols.items()):
-        raw_faces.append(np.array(f_nodes, dtype=np.int64))
-        pos_vol = vols[0]
-        neg_vol = vols[1] if len(vols) > 1 else 0
-        mapping_table.append([pos_vol, neg_vol, local_tri_id])
+            if is_reversed:
+              face_nodes = np.array(
+                  [nodes[0], nodes[2], nodes[1]], dtype=np.int64
+              )
+            else:
+              face_nodes = np.array(
+                  [nodes[0], nodes[1], nodes[2]], dtype=np.int64
+              )
 
-      raw_faces = np.array(raw_faces, dtype=np.int64)
-      mapping_table = np.array(mapping_table, dtype=np.int32)
-    else:
-      surf_ownership = {}
-      for vol in geom_volumes:
-        vol_geom_tag = vol[1]
-        vol_phys_id = vol_tag_to_physical_id[vol_geom_tag]
+            pos_vol = vol_id
+            neg_vol = owners[1][0] if len(owners) > 1 else 0
 
-        boundaries = gmsh.model.getBoundary(
-            [vol], combined=False, oriented=True
-        )
-        for b in boundaries:
-          if b[0] == 2:
-            signed_surf_tag = int(b[1])
-            surf_tag = abs(signed_surf_tag)
-            is_reversed = signed_surf_tag < 0
+            raw_faces.append(face_nodes)
+            mapping_table.append([pos_vol, neg_vol, local_tri_id])
+            local_tri_id += 1
 
-            if surf_tag not in surf_ownership:
-              surf_ownership[surf_tag] = []
-            surf_ownership[surf_tag].append((vol_phys_id, is_reversed))
-
-      raw_faces = []
-      mapping_table = []
-      local_tri_id = 0
-
-      for surf_tag, owners in surf_ownership.items():
-        elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(
-            2, surf_tag
-        )
-
-        for i, etype in enumerate(elem_types):
-          if etype == 2:
-            t_tags = elem_tags[i]
-            n_tags = elem_node_tags[i].reshape(-1, 3)
-
-            for j, _ in enumerate(t_tags):
-              nodes = n_tags[j]
-              vol_id, is_reversed = owners[0]
-
-              if is_reversed:
-                face_nodes = np.array(
-                    [nodes[0], nodes[2], nodes[1]], dtype=np.int64
-                )
-              else:
-                face_nodes = np.array(
-                    [nodes[0], nodes[1], nodes[2]], dtype=np.int64
-                )
-
-              pos_vol = vol_id
-              neg_vol = owners[1][0] if len(owners) > 1 else 0
-
-              raw_faces.append(face_nodes)
-              mapping_table.append([pos_vol, neg_vol, local_tri_id])
-              local_tri_id += 1
-
-      raw_faces = np.array(raw_faces, dtype=np.int64)
-      mapping_table = np.array(mapping_table, dtype=np.int32)
+    raw_faces = np.array(raw_faces, dtype=np.int64)
+    mapping_table = np.array(mapping_table, dtype=np.int32)
 
   unique_node_tags = np.unique(raw_faces)
   vertices = coord_array[unique_node_tags]
