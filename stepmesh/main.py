@@ -248,6 +248,62 @@ def glue(
         if dim == 3:
           new_vol_to_filename[tag] = fname
 
+  # ------------------------------------------------------------------
+  # [FIX] 记录 fragment 之后每个 volume 的质心，用于 removeDup 后重建映射
+  # ------------------------------------------------------------------
+  frag_vol_centroids = {}
+  for _, tag in gmsh.model.getEntities(dim=3):
+    try:
+      com = gmsh.model.occ.getCenterOfMass(3, tag)
+    except Exception:
+      # 退化几何时回退到 bbox 中心
+      bb = gmsh.model.occ.getBoundingBox(3, tag)
+      com = (
+          (bb[0] + bb[3]) / 2.0,
+          (bb[1] + bb[4]) / 2.0,
+          (bb[2] + bb[5]) / 2.0,
+      )
+    frag_vol_centroids[tag] = np.array(com, dtype=np.float64)
+
+  # ------------------------------------------------------------------
+  # [FIX] 合并几何上完全重合的 volume / surface
+  # ------------------------------------------------------------------
+  gmsh.model.occ.removeAllDuplicates()
+  gmsh.model.occ.synchronize()
+
+  # ------------------------------------------------------------------
+  # [FIX] 用质心匹配重建 vol_tag -> filename
+  # ------------------------------------------------------------------
+  final_vol_to_filename = {}
+  for _, tag in gmsh.model.getEntities(dim=3):
+    try:
+      com = np.array(
+          gmsh.model.occ.getCenterOfMass(3, tag), dtype=np.float64
+      )
+    except Exception:
+      bb = gmsh.model.occ.getBoundingBox(3, tag)
+      com = np.array([
+          (bb[0] + bb[3]) / 2.0,
+          (bb[1] + bb[4]) / 2.0,
+          (bb[2] + bb[5]) / 2.0,
+      ], dtype=np.float64)
+
+    best_tag = None
+    best_dist = float("inf")
+    for old_tag, old_com in frag_vol_centroids.items():
+      d = float(np.sum((com - old_com) ** 2))
+      if d < best_dist:
+        best_dist = d
+        best_tag = old_tag
+
+    if best_tag is not None and best_tag in new_vol_to_filename:
+      final_vol_to_filename[tag] = new_vol_to_filename[best_tag]
+    else:
+      final_vol_to_filename[tag] = "unknown"
+
+  new_vol_to_filename = final_vol_to_filename
+  # ------------------------------------------------------------------
+
   geom_volumes = gmsh.model.getEntities(dim=3)
 
   vol_tag_to_physical_id = {}
