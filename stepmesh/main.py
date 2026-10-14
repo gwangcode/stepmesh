@@ -89,7 +89,7 @@ def step2msh(
     before_vols = set(gmsh.model.getEntities(dim=3))
 
     try:
-      gmsh.merge(path)
+      gmsh.model.occ.importShapes(path)
     except Exception as e:
       raise ValueError(f"Failed to read STEP file {path}: {e}")
 
@@ -275,7 +275,7 @@ def glue(
       continue
     before_vols = set(gmsh.model.getEntities(dim=3))
     try:
-      gmsh.merge(path)
+      gmsh.model.occ.importShapes(path)
     except Exception as e:
       raise ValueError(f"Failed to read STEP file {path}: {e}")
     gmsh.model.occ.synchronize()
