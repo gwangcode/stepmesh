@@ -317,3 +317,74 @@ def test_msh2stl_missing_input(tmp_path):
 def test_msh2unv_missing_input(tmp_path):
     with pytest.raises(FileNotFoundError):
         msh2unv(str(tmp_path / "nope.msh"), str(tmp_path / "x.unv"))
+
+
+def test_msh2stl_include_internal_adds_faces(tmp_path, trio_paths):
+    """include_internal=True should output boundary + internal faces,
+    and the count must be strictly larger than boundary-only."""
+    msh = tmp_path / "m.msh"
+    step2msh(trio_paths, str(msh), min_size=0.3, max_size=1.0)
+
+    stl_outer = tmp_path / "outer.stl"
+    stl_full = tmp_path / "full.stl"
+    msh2stl(str(msh), str(stl_outer), include_internal=False)
+    msh2stl(str(msh), str(stl_full), include_internal=True)
+
+    # 计数 STL 里的 "facet normal"
+    def count_facets(path):
+        return path.read_text().count("facet normal")
+
+    n_outer = count_facets(stl_outer)
+    n_full = count_facets(stl_full)
+
+    assert n_outer > 0
+    assert n_full > n_outer, (
+        f"include_internal=True should add faces: "
+        f"outer={n_outer}, full={n_full}"
+    )
+
+
+def test_msh2stl_internal_contains_contact_geometry(tmp_path, trio_paths):
+    """The extra faces in include_internal=True must include the cube top
+    (z=10) and cube bottom (z=0) contact disks, not just duplicated outer
+    faces."""
+    import trimesh
+    msh = tmp_path / "m.msh"
+    step2msh(trio_paths, str(msh), min_size=0.3, max_size=1.0)
+
+    stl_outer = tmp_path / "outer.stl"
+    stl_full = tmp_path / "full.stl"
+    msh2stl(str(msh), str(stl_outer), include_internal=False)
+    msh2stl(str(msh), str(stl_full), include_internal=True)
+
+    m_outer = trimesh.load(str(stl_outer), process=False)
+    m_full = trimesh.load(str(stl_full), process=False)
+
+    # 内部面应包含平面 (z=0 圆盘 + z=10 圆盘)
+    # 检查 full 里有不在 outer 的三角形，且其顶点 z 都接近 0 或 10
+    def tri_keys(mesh):
+        keys = set()
+        for tri in mesh.faces:
+            pts = tuple(sorted(tuple(np.round(mesh.vertices[i], 6))
+                               for i in tri))
+            keys.add(pts)
+        return keys
+
+    outer_keys = tri_keys(m_outer)
+    full_keys = tri_keys(m_full)
+    extra = full_keys - outer_keys
+
+    assert len(extra) > 0, "no extra faces in include_internal=True"
+
+    # 额外面里应该有位于 z=0 或 z=10 平面上的
+    n_at_z_plane = 0
+    for tri_pts in extra:
+        zs = [p[2] for p in tri_pts]
+        if all(abs(z - 0.0) < 1e-4 for z in zs):
+            n_at_z_plane += 1
+        elif all(abs(z - 10.0) < 1e-4 for z in zs):
+            n_at_z_plane += 1
+    assert n_at_z_plane > 0, (
+        f"expected extra faces on z=0 or z=10 contact planes, "
+        f"got {n_at_z_plane} / {len(extra)}"
+    )
