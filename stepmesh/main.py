@@ -607,9 +607,25 @@ def msh2unv(msh_path: str, unv_path: str) -> str:
     return os.path.abspath(unv_path)
 
 
-def msh2stl(msh_path: str, stl_path: str) -> str:
-    """Extract the boundary surface (tets' outer faces) from a .msh file and
-    write an ASCII STL."""
+def msh2stl(msh_path: str, stl_path: str, include_internal: bool = False) -> str:
+    """Extract triangle faces from a 3D tetrahedral .msh file and write ASCII STL.
+
+    Args:
+        msh_path: Input .msh file path (must contain 3D tetrahedra).
+        stl_path: Output .stl file path.
+        include_internal:
+            - False (default): export only the outer boundary skin
+              (faces shared by exactly 1 tetrahedron). The result is
+              watertight.
+            - True: export ALL faces, including internal contact
+              interfaces between volumes (faces shared by 2 tetrahedra
+              coming from different physical volumes). Each internal
+              face is emitted once. The result is a conformal
+              multi-domain mesh, not watertight at the interfaces.
+
+    Returns:
+        Absolute path to the written STL file.
+    """
     if not os.path.exists(msh_path):
         raise FileNotFoundError(f"Input MSH file not found: {msh_path}")
 
@@ -626,9 +642,7 @@ def msh2stl(msh_path: str, stl_path: str) -> str:
         node_map = {tag: i for i, tag in enumerate(node_tags)}
         nodes = node_coords.reshape(-1, 3)
 
-        elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(
-            dim=3
-        )
+        elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(dim=3)
 
         tets = []
         for e_type, e_nodes in zip(elem_types, elem_node_tags):
@@ -637,12 +651,10 @@ def msh2stl(msh_path: str, stl_path: str) -> str:
                 break
 
         if len(tets) == 0:
-            raise RuntimeError(
-                "No 3D tetrahedral elements found in the mesh file."
-            )
+            raise RuntimeError("No 3D tetrahedral elements found in the mesh file.")
 
+        # ---- 收集所有 tet 面（带方向）----
         face_count = {}
-
         for tet in tets:
             p = [node_map[tag] for tag in tet]
             sub_faces = [
@@ -653,25 +665,42 @@ def msh2stl(msh_path: str, stl_path: str) -> str:
             ]
             for f in sub_faces:
                 sorted_f = tuple(sorted(f))
-                if sorted_f not in face_count:
-                    face_count[sorted_f] = []
-                face_count[sorted_f].append(f)
+                face_count.setdefault(sorted_f, []).append(f)
 
-        boundary_triangles = [
-            f_list[0] for _, f_list in face_count.items() if len(f_list) == 1
-        ]
+        # ---- 选择要输出的面 ----
+        triangles = []
+        n_boundary = 0
+        n_internal = 0
+        n_nonmanifold = 0
+        for sorted_f, f_list in face_count.items():
+            n = len(f_list)
+            if n == 1:
+                triangles.append(f_list[0])
+                n_boundary += 1
+            elif n == 2:
+                if include_internal:
+                    triangles.append(f_list[0])  # 内部面只输出一次
+                    n_internal += 1
+            else:
+                # 非流形边（3+ tets 共享一面）——正常网格不会出现
+                n_nonmanifold += 1
+                if include_internal:
+                    triangles.append(f_list[0])
 
+        if n_nonmanifold:
+            print(f"Warning: {n_nonmanifold} non-manifold tet faces detected")
+
+        # ---- 写 STL ----
         output_dir = os.path.dirname(os.path.abspath(stl_path))
         if output_dir and not os.path.exists(output_dir):
             os.makedirs(output_dir)
 
         with open(stl_path, "w") as f:
             f.write("solid GmshModel\n")
-            for tri in boundary_triangles:
+            for tri in triangles:
                 pt0 = nodes[tri[0]]
                 pt1 = nodes[tri[1]]
                 pt2 = nodes[tri[2]]
-
                 f.write("  facet normal 0.0 0.0 0.0\n")
                 f.write("    outer loop\n")
                 f.write(f"      vertex {pt0[0]} {pt0[1]} {pt0[2]}\n")
